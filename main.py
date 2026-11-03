@@ -22,7 +22,12 @@ current_requesters = {}
 
 
 def duration(ms):
-    seconds = int(ms / 1000)
+    if ms is None:
+        return "Unknown"
+    try:
+        seconds = max(0, int(ms / 1000))
+    except (TypeError, ValueError):
+        return "Unknown"
     return str(timedelta(seconds=seconds))
 
 
@@ -112,14 +117,18 @@ async def connect_player(interaction):
     elif player.channel != channel:
         await player.move_to(channel)
 
+    # Wavelink AutoPlay manages track transitions. Never manually start
+    # another track from on_wavelink_track_end while AutoPlay is enabled.
     player.autoplay = wavelink.AutoPlayMode.enabled
+    if player.queue.mode is None:
+        player.queue.mode = wavelink.QueueMode.normal
+    loop_modes.setdefault(interaction.guild.id, "off")
     return player
 
 
 async def add_track(player, track, requester):
     track.extras = {"requester_id": requester.id}
     await player.queue.put_wait(track)
-
     player.autoplay = wavelink.AutoPlayMode.enabled
 
     if not player.playing and not player.paused:
@@ -282,6 +291,9 @@ class PlayerView(discord.ui.View):
             return
 
         player.queue.clear()
+        player.auto_queue.clear()
+        player.queue.mode = wavelink.QueueMode.normal
+        player.autoplay = wavelink.AutoPlayMode.disabled
         loop_modes[interaction.guild.id] = "off"
         await player.stop()
 
@@ -336,6 +348,33 @@ class BlackEmpireMusic(commands.Bot):
         print(
             f"NodeLink CONNECTED: {payload.node.identifier}"
         )
+
+    async def on_wavelink_track_start(self, payload):
+        player = payload.player
+        if player:
+            print(
+                f"[MUSIC START] {getattr(payload.track, 'title', 'Unknown')} "
+                f"| queue={len(player.queue)} "
+                f"| auto_queue={len(player.auto_queue)} "
+                f"| autoplay={player.autoplay.name}"
+            )
+
+    async def on_wavelink_track_end(self, payload):
+        player = payload.player
+        if player:
+            print(
+                f"[MUSIC END] {getattr(payload.track, 'title', 'Unknown')} "
+                f"| reason={payload.reason} "
+                f"| queue={len(player.queue)} "
+                f"| auto_queue={len(player.auto_queue)} "
+                f"| autoplay={player.autoplay.name}"
+            )
+
+    async def on_wavelink_track_exception(self, payload):
+        print(f"[MUSIC EXCEPTION] {payload.exception}")
+
+    async def on_wavelink_track_stuck(self, payload):
+        print(f"[MUSIC STUCK] {getattr(payload.track, 'title', 'Unknown')}")
 
 
 bot = BlackEmpireMusic()
@@ -421,7 +460,11 @@ async def play(interaction: discord.Interaction, query: str):
         if isinstance(tracks, wavelink.Playlist):
             selected = tracks.tracks
             for track in selected:
-                await add_track(player, track, interaction.user)
+                track.extras = {"requester_id": interaction.user.id}
+            await player.queue.put_wait(selected)
+            player.autoplay = wavelink.AutoPlayMode.enabled
+            if not player.playing and not player.paused and player.queue:
+                await player.play(player.queue.get(), populate=True)
 
             return await interaction.followup.send(
                 f"✅ Playlist **{tracks.name}** ditambahkan."
@@ -504,6 +547,9 @@ async def stop(interaction: discord.Interaction):
         return
 
     player.queue.clear()
+    player.auto_queue.clear()
+    player.queue.mode = wavelink.QueueMode.normal
+    player.autoplay = wavelink.AutoPlayMode.disabled
     loop_modes[interaction.guild.id] = "off"
     await player.stop()
 
@@ -573,9 +619,16 @@ def queue_dashboard_embed(player, page=0):
 
     mode = loop_modes.get(player.guild.id, "off").upper()
 
-    total_ms = sum(track.length for track in tracks)
-    total_seconds = total_ms // 1000
-    total_time = str(timedelta(seconds=total_seconds))
+    known_durations = [
+        track.length for track in tracks
+        if isinstance(getattr(track, "length", None), (int, float))
+    ]
+    total_ms = sum(known_durations)
+    total_time = (
+        str(timedelta(seconds=int(total_ms // 1000)))
+        if len(known_durations) == len(tracks)
+        else "Unknown"
+    )
 
     embed.add_field(
         name="🎧 TOTAL QUEUE",
@@ -685,12 +738,15 @@ class QueueClearConfirm(discord.ui.View):
         )
 
         try:
-            await self.dashboard.message.edit(
-                embed=self.dashboard.build_embed(),
-                view=self.dashboard
-            )
-        except Exception:
-            pass
+            embed = self.dashboard.build_embed()
+            self.dashboard.rebuild()
+            if self.dashboard.message:
+                await self.dashboard.message.edit(
+                    embed=embed,
+                    view=self.dashboard
+                )
+        except discord.HTTPException as error:
+            print(f"[QUEUE DASHBOARD] Gagal refresh setelah clear: {error}")
 
     @discord.ui.button(
         label="Batal",
@@ -716,7 +772,6 @@ class QueueDashboard(discord.ui.View):
             1,
             (len(player.queue) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE
         )
-
         self.rebuild()
 
     def build_embed(self):
@@ -728,8 +783,14 @@ class QueueDashboard(discord.ui.View):
 
     def rebuild(self):
         self.clear_items()
+        total = len(self.player.queue)
+        self.pages = max(
+            1,
+            (total + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE
+        )
+        self.page = max(0, min(self.page, self.pages - 1))
 
-        if len(self.player.queue):
+        if total:
             self.add_item(QueueRemoveSelect(self))
 
         previous = discord.ui.Button(
@@ -848,9 +909,10 @@ class QueueDashboard(discord.ui.View):
         return True
 
     async def refresh(self, interaction):
+        embed = self.build_embed()
         self.rebuild()
         await interaction.response.edit_message(
-            embed=self.build_embed(),
+            embed=embed,
             view=self
         )
 
@@ -889,6 +951,12 @@ class QueueDashboard(discord.ui.View):
         current = loop_modes.get(self.player.guild.id, "off")
         next_mode = modes[(modes.index(current) + 1) % len(modes)]
 
+        queue_modes = {
+            "off": wavelink.QueueMode.normal,
+            "track": wavelink.QueueMode.loop,
+            "queue": wavelink.QueueMode.loop_all,
+        }
+        self.player.queue.mode = queue_modes[next_mode]
         loop_modes[self.player.guild.id] = next_mode
         await self.refresh(interaction)
 
@@ -948,10 +1016,8 @@ class QueueDashboard(discord.ui.View):
             ephemeral=True
         )
 
-        try:
-            self.message = await interaction.original_response()
-        except Exception:
-            self.message = None
+        # Keep self.message pointing to the public dashboard message.
+        # The ephemeral confirmation is intentionally not stored here.
 
     async def on_timeout(self):
         for item in self.children:
@@ -1037,6 +1103,12 @@ async def loop(
     if not await check_voice(interaction, player):
         return
 
+    queue_modes = {
+        "off": wavelink.QueueMode.normal,
+        "track": wavelink.QueueMode.loop,
+        "queue": wavelink.QueueMode.loop_all,
+    }
+    player.queue.mode = queue_modes[mode.value]
     loop_modes[interaction.guild.id] = mode.value
 
     await interaction.response.send_message(
@@ -1053,6 +1125,9 @@ async def leave(interaction: discord.Interaction):
         return
 
     player.queue.clear()
+    player.auto_queue.clear()
+    player.queue.mode = wavelink.QueueMode.normal
+    player.autoplay = wavelink.AutoPlayMode.disabled
     loop_modes[interaction.guild.id] = "off"
     await player.disconnect()
 
