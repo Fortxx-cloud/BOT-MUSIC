@@ -125,11 +125,21 @@ async def connect_player(interaction):
     filters = player.filters
     filters.equalizer.set(
         bands=[
-            {"band": 2, "gain": 0.06},   # 63 Hz: gentle low-end body
-            {"band": 3, "gain": 0.07},   # 100 Hz: controlled bass
-            {"band": 5, "gain": -0.04},  # 250 Hz: reduce muddiness
-            {"band": 10, "gain": 0.04},  # 2.5 kHz: presence/detail
-            {"band": 12, "gain": 0.03},  # 6.3 kHz: a little clarity
+            {"band": 0, "gain": 0.02},
+            {"band": 1, "gain": 0.04},
+            {"band": 2, "gain": 0.06},
+            {"band": 3, "gain": 0.05},
+            {"band": 4, "gain": 0.02},
+            {"band": 5, "gain": -0.02},
+            {"band": 6, "gain": -0.03},
+            {"band": 7, "gain": -0.02},
+            {"band": 8, "gain": 0.01},
+            {"band": 9, "gain": 0.03},
+            {"band": 10, "gain": 0.04},
+            {"band": 11, "gain": 0.04},
+            {"band": 12, "gain": 0.02},
+            {"band": 13, "gain": 0.00},
+            {"band": 14, "gain": -0.02},
         ]
     )
     await player.set_filters(filters)
