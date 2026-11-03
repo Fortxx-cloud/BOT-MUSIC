@@ -439,34 +439,65 @@ class BlackEmpireMusic(commands.Bot):
     async def on_wavelink_track_end(self, payload):
         player = payload.player
         track = payload.track
+
         if not player or not track:
             return
 
-        reason = getattr(payload.reason, "name", str(payload.reason)).lower()
+        reason = getattr(
+            payload.reason, "name", str(payload.reason)
+        ).lower()
+
         title = getattr(track, "title", "Unknown")
+
         print(
             f"[MUSIC END] {title} | reason={reason} "
-            f"| queue={len(player.queue)} "
-            f"| autoplay={player.autoplay.name}"
+            f"| queue={len(player.queue)}"
         )
 
-        if reason != "finished":
-            return
+        guild_id = getattr(
+            getattr(player, "guild", None), "id", None
+        )
 
-        guild_id = getattr(getattr(player, "guild", None), "id", None)
         if guild_id is None:
             return
 
         channel = await self._music_notice_channel(guild_id)
+
         if channel is None:
+            print("[MUSIC NOTICE ERROR] Channel not found")
             return
 
-        try:
-            await channel.send(
-                f"🏁 **LAGU SELESAI**\n**{title}**"
-            )
-        except Exception as error:
-            print(f"[MUSIC NOTICE ERROR] Gagal kirim notifikasi selesai: {error}")
+        if reason == "finished":
+            try:
+                await channel.send(
+                    f"🏁 **LAGU SELESAI**\\n**{title}**"
+                )
+            except Exception as error:
+                print(f"[MUSIC NOTICE ERROR] {error}")
+
+            await asyncio.sleep(4)
+
+            if (
+                not player.playing
+                and not player.paused
+                and not player.queue
+                and player.current is None
+            ):
+                try:
+                    await channel.send(
+                        "⏹️ **MUSIK SELESAI**\\n"
+                        "Antrean lagu sudah habis."
+                    )
+                except Exception as error:
+                    print(f"[MUSIC NOTICE ERROR] {error}")
+
+        elif reason == "stopped":
+            try:
+                await channel.send(
+                    f"⏹️ **MUSIK DIHENTIKAN**\\n**{title}**"
+                )
+            except Exception as error:
+                print(f"[MUSIC NOTICE ERROR] {error}")
 
     async def on_wavelink_track_exception(self, payload):
         print(f"[MUSIC EXCEPTION] {payload.exception}")
