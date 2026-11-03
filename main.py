@@ -712,6 +712,10 @@ class QueueDashboard(discord.ui.View):
         self.requester = requester
         self.page = page
         self.message = None
+        self.pages = max(
+            1,
+            (len(player.queue) + QUEUE_PAGE_SIZE - 1) // QUEUE_PAGE_SIZE
+        )
 
         self.rebuild()
 
