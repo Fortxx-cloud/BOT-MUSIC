@@ -136,7 +136,7 @@ async def connect_player(interaction):
 
     # Wavelink AutoPlay manages track transitions. Never manually start
     # another track from on_wavelink_track_end while AutoPlay is enabled.
-    player.autoplay = wavelink.AutoPlayMode.enabled
+    player.autoplay = wavelink.AutoPlayMode.partial
     if player.queue.mode is None:
         player.queue.mode = wavelink.QueueMode.normal
     loop_modes.setdefault(interaction.guild.id, "off")
@@ -148,11 +148,11 @@ async def add_track(player, track, requester, text_channel=None):
     if player.guild and text_channel:
         music_notice_channels[player.guild.id] = text_channel.id
     await player.queue.put_wait(track)
-    player.autoplay = wavelink.AutoPlayMode.enabled
+    player.autoplay = wavelink.AutoPlayMode.partial
 
     if not player.playing and not player.paused:
         next_track = player.queue.get()
-        await player.play(next_track, populate=True)
+        await player.play(next_track, populate=False)
 
 
 
@@ -368,84 +368,95 @@ class BlackEmpireMusic(commands.Bot):
             f"NodeLink CONNECTED: {payload.node.identifier}"
         )
 
+    async def _music_notice_channel(self, guild_id):
+        channel_id = music_notice_channels.get(guild_id)
+        if not channel_id:
+            return None
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(channel_id)
+            except Exception as error:
+                print(f"[MUSIC NOTICE ERROR] Gagal mengambil channel: {error}")
+        return channel
+
     async def on_wavelink_track_start(self, payload):
         player = payload.player
-        if player:
-            print(
-                f"[MUSIC START] {getattr(payload.track, 'title', 'Unknown')} "
-                f"| queue={len(player.queue)} "
-                f"| auto_queue={len(player.auto_queue)} "
-                f"| autoplay={player.autoplay.name}"
-            )
+        track = payload.track
+        if not player or not track:
+            return
+
+        title = getattr(track, "title", "Unknown")
+        print(f"[MUSIC START] {title}")
+
+        guild_id = getattr(getattr(player, "guild", None), "id", None)
+        if guild_id is None:
+            return
+
+        channel = await self._music_notice_channel(guild_id)
+        if channel is None:
+            print(f"[MUSIC NOTICE] Channel belum tersedia untuk {guild_id}")
+            return
+
+        requester_id = None
+        try:
+            requester_id = track.extras.get("requester_id")
+        except (AttributeError, TypeError):
+            pass
+
+        description = f"**{title}**"
+        author = getattr(track, "author", None)
+        if author:
+            description += f"\\n🎤 {author}"
+
+        uri = getattr(track, "uri", None)
+        if uri:
+            description = f"[{description}]({uri})"
+
+        if requester_id:
+            description += f"\\n🙋 Diminta oleh <@{requester_id}>"
+
+        embed = discord.Embed(
+            title="🎶 ZOMA SEKARANG MEMUTAR",
+            description=description,
+            color=discord.Color.gold()
+        )
+        try:
+            await channel.send(embed=embed)
+        except Exception as error:
+            print(f"[MUSIC NOTICE ERROR] Gagal kirim notifikasi mulai: {error}")
 
     async def on_wavelink_track_end(self, payload):
         player = payload.player
-        if not player:
+        track = payload.track
+        if not player or not track:
             return
 
         reason = getattr(payload.reason, "name", str(payload.reason)).lower()
+        title = getattr(track, "title", "Unknown")
         print(
-            f"[MUSIC END] {getattr(payload.track, 'title', 'Unknown')} "
-            f"| reason={reason} "
+            f"[MUSIC END] {title} | reason={reason} "
             f"| queue={len(player.queue)} "
-            f"| auto_queue={len(player.auto_queue)} "
             f"| autoplay={player.autoplay.name}"
         )
 
-        # Advance the user's regular queue when a track ends or fails.
-        # Wavelink AutoPlay remains enabled for recommendations only when
-        # the regular queue is empty.
-        if reason not in ("finished", "loadfailed", "stopped"):
+        if reason != "finished":
             return
 
         guild_id = getattr(getattr(player, "guild", None), "id", None)
         if guild_id is None:
             return
 
-        lock = track_advance_locks.setdefault(guild_id, asyncio.Lock())
-        async with lock:
-            # Another event/command may already have started the next track.
-            if player.playing or player.paused:
-                return
+        channel = await self._music_notice_channel(guild_id)
+        if channel is None:
+            return
 
-            channel_id = music_notice_channels.get(guild_id)
-            notice_channel = self.get_channel(channel_id) if channel_id else None
-            finished_title = getattr(payload.track, "title", "Lagu sebelumnya")
-
-            if not player.queue:
-                print(f"[MUSIC END] Queue kosong untuk guild {guild_id}.")
-                if reason == "finished" and notice_channel:
-                    try:
-                        await notice_channel.send(
-                            f"🎵 **LAGU SELESAI**\n**{finished_title}**\n\n"
-                            "🎩 **ANTREAN SELESAI** — tidak ada lagu berikutnya."
-                        )
-                    except Exception as notify_error:
-                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
-                return
-
-            try:
-                next_track = player.queue.get()
-                print(f"[MUSIC NEXT] Memulai: {getattr(next_track, 'title', 'Unknown')}")
-                await player.play(next_track, populate=True)
-                if reason == "finished" and notice_channel:
-                    try:
-                        await notice_channel.send(
-                            f"🎵 **LAGU SELESAI**\n**{finished_title}**\n\n"
-                            "⏭️ **BERLANJUT KE LAGU SELANJUTNYA**\n"
-                            f"**[{next_track.title}]({next_track.uri})**"
-                        )
-                    except Exception as notify_error:
-                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
-            except Exception as error:
-                print(f"[MUSIC NEXT ERROR] Gagal memulai lagu berikutnya: {error}")
-                if notice_channel:
-                    try:
-                        await notice_channel.send(
-                            f"⚠️ Gagal memulai lagu berikutnya setelah **{finished_title}**."
-                        )
-                    except Exception as notify_error:
-                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
+        try:
+            await channel.send(
+                f"🏁 **LAGU SELESAI**\n**{title}**"
+            )
+        except Exception as error:
+            print(f"[MUSIC NOTICE ERROR] Gagal kirim notifikasi selesai: {error}")
 
     async def on_wavelink_track_exception(self, payload):
         print(f"[MUSIC EXCEPTION] {payload.exception}")
@@ -541,9 +552,9 @@ async def play(interaction: discord.Interaction, query: str):
             for track in selected:
                 track.extras = {"requester_id": interaction.user.id}
             await player.queue.put_wait(selected)
-            player.autoplay = wavelink.AutoPlayMode.enabled
+            player.autoplay = wavelink.AutoPlayMode.partial
             if not player.playing and not player.paused and player.queue:
-                await player.play(player.queue.get(), populate=True)
+                await player.play(player.queue.get(), populate=False)
 
             return await interaction.followup.send(
                 f"✅ Playlist **{tracks.name}** ditambahkan."
