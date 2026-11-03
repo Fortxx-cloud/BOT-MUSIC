@@ -20,6 +20,7 @@ BRAND = "ZOMA APP 🎩"
 loop_modes = {}
 current_requesters = {}
 track_advance_locks = {}
+music_notice_channels = {}
 
 
 def duration(ms):
@@ -142,8 +143,10 @@ async def connect_player(interaction):
     return player
 
 
-async def add_track(player, track, requester):
+async def add_track(player, track, requester, text_channel=None):
     track.extras = {"requester_id": requester.id}
+    if player.guild and text_channel:
+        music_notice_channels[player.guild.id] = text_channel.id
     await player.queue.put_wait(track)
     player.autoplay = wavelink.AutoPlayMode.enabled
 
@@ -191,7 +194,7 @@ class SearchSelect(discord.ui.Select):
             player = await connect_player(interaction)
             track = self.tracks[int(self.values[0])]
 
-            await add_track(player, track, interaction.user)
+            await add_track(player, track, interaction.user, interaction.channel)
 
             embed = make_embed(
                 "✅ LAGU BERHASIL DITAMBAHKAN",
@@ -405,18 +408,44 @@ class BlackEmpireMusic(commands.Bot):
             if player.playing or player.paused:
                 return
 
+            channel_id = music_notice_channels.get(guild_id)
+            notice_channel = self.get_channel(channel_id) if channel_id else None
+            finished_title = getattr(payload.track, "title", "Lagu sebelumnya")
+
             if not player.queue:
                 print(f"[MUSIC END] Queue kosong untuk guild {guild_id}.")
+                if reason == "finished" and notice_channel:
+                    try:
+                        await notice_channel.send(
+                            f"🎵 **LAGU SELESAI**\n**{finished_title}**\n\n"
+                            "🎩 **ANTREAN SELESAI** — tidak ada lagu berikutnya."
+                        )
+                    except Exception as notify_error:
+                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
                 return
 
             try:
                 next_track = player.queue.get()
-                print(
-                    f"[MUSIC NEXT] Memulai: {getattr(next_track, 'title', 'Unknown')}"
-                )
+                print(f"[MUSIC NEXT] Memulai: {getattr(next_track, 'title', 'Unknown')}")
                 await player.play(next_track, populate=True)
+                if reason == "finished" and notice_channel:
+                    try:
+                        await notice_channel.send(
+                            f"🎵 **LAGU SELESAI**\n**{finished_title}**\n\n"
+                            "⏭️ **BERLANJUT KE LAGU SELANJUTNYA**\n"
+                            f"**[{next_track.title}]({next_track.uri})**"
+                        )
+                    except Exception as notify_error:
+                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
             except Exception as error:
                 print(f"[MUSIC NEXT ERROR] Gagal memulai lagu berikutnya: {error}")
+                if notice_channel:
+                    try:
+                        await notice_channel.send(
+                            f"⚠️ Gagal memulai lagu berikutnya setelah **{finished_title}**."
+                        )
+                    except Exception as notify_error:
+                        print(f"[MUSIC NOTICE ERROR] {notify_error}")
 
     async def on_wavelink_track_exception(self, payload):
         print(f"[MUSIC EXCEPTION] {payload.exception}")
@@ -507,6 +536,8 @@ async def play(interaction: discord.Interaction, query: str):
 
         if isinstance(tracks, wavelink.Playlist):
             selected = tracks.tracks
+            if player.guild and interaction.channel:
+                music_notice_channels[player.guild.id] = interaction.channel.id
             for track in selected:
                 track.extras = {"requester_id": interaction.user.id}
             await player.queue.put_wait(selected)
@@ -519,7 +550,7 @@ async def play(interaction: discord.Interaction, query: str):
             )
 
         track = tracks[0]
-        await add_track(player, track, interaction.user)
+        await add_track(player, track, interaction.user, interaction.channel)
 
         await interaction.followup.send(
             embed=track_embed(track, interaction.user),
