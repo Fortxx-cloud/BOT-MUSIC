@@ -117,6 +117,21 @@ async def connect_player(interaction):
     elif player.channel != channel:
         await player.move_to(channel)
 
+    # Permanent, subtle clarity EQ: applied automatically whenever the
+    # player connects. This shapes tone; it cannot repair a poor source or
+    # network/voice packet loss.
+    filters = player.filters
+    filters.equalizer.set(
+        bands=[
+            {"band": 2, "gain": 0.06},   # 63 Hz: gentle low-end body
+            {"band": 3, "gain": 0.07},   # 100 Hz: controlled bass
+            {"band": 5, "gain": -0.04},  # 250 Hz: reduce muddiness
+            {"band": 10, "gain": 0.04},  # 2.5 kHz: presence/detail
+            {"band": 12, "gain": 0.03},  # 6.3 kHz: a little clarity
+        ]
+    )
+    await player.set_filters(filters)
+
     # Wavelink AutoPlay manages track transitions. Never manually start
     # another track from on_wavelink_track_end while AutoPlay is enabled.
     player.autoplay = wavelink.AutoPlayMode.enabled
