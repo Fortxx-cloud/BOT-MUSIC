@@ -19,6 +19,7 @@ BRAND = "ZOMA APP 🎩"
 
 loop_modes = {}
 current_requesters = {}
+track_advance_locks = {}
 
 
 def duration(ms):
@@ -376,14 +377,46 @@ class BlackEmpireMusic(commands.Bot):
 
     async def on_wavelink_track_end(self, payload):
         player = payload.player
-        if player:
-            print(
-                f"[MUSIC END] {getattr(payload.track, 'title', 'Unknown')} "
-                f"| reason={payload.reason} "
-                f"| queue={len(player.queue)} "
-                f"| auto_queue={len(player.auto_queue)} "
-                f"| autoplay={player.autoplay.name}"
-            )
+        if not player:
+            return
+
+        reason = getattr(payload.reason, "name", str(payload.reason)).lower()
+        print(
+            f"[MUSIC END] {getattr(payload.track, 'title', 'Unknown')} "
+            f"| reason={reason} "
+            f"| queue={len(player.queue)} "
+            f"| auto_queue={len(player.auto_queue)} "
+            f"| autoplay={player.autoplay.name}"
+        )
+
+        # Advance the user's regular queue when a track ends or fails.
+        # Wavelink AutoPlay remains enabled for recommendations only when
+        # the regular queue is empty.
+        if reason not in ("finished", "loadfailed", "stopped"):
+            return
+
+        guild_id = getattr(getattr(player, "guild", None), "id", None)
+        if guild_id is None:
+            return
+
+        lock = track_advance_locks.setdefault(guild_id, asyncio.Lock())
+        async with lock:
+            # Another event/command may already have started the next track.
+            if player.playing or player.paused:
+                return
+
+            if not player.queue:
+                print(f"[MUSIC END] Queue kosong untuk guild {guild_id}.")
+                return
+
+            try:
+                next_track = player.queue.get()
+                print(
+                    f"[MUSIC NEXT] Memulai: {getattr(next_track, 'title', 'Unknown')}"
+                )
+                await player.play(next_track, populate=True)
+            except Exception as error:
+                print(f"[MUSIC NEXT ERROR] Gagal memulai lagu berikutnya: {error}")
 
     async def on_wavelink_track_exception(self, payload):
         print(f"[MUSIC EXCEPTION] {payload.exception}")
