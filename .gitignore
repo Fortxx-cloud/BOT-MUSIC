@@ -13,3 +13,5 @@ nodes/nodelink/app/.env
 
 # Private user playlist data
 playlists.json
+smart-radio-history.json
+smart-radio-history.tmp

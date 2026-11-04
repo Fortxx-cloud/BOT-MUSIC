@@ -24,6 +24,11 @@ import {
     NodeLinkDefaultSources
 } from 'lavalink-client';
 
+import {
+    recordTrackStart,
+    recommendNextTrack
+} from './music/smart-radio.js';
+
 const TOKEN = process.env.DISCORD_TOKEN;
 const AUDIO_NODE = (process.env.AUDIO_NODE || 'nodelink').toLowerCase();
 const NODE_URI = AUDIO_NODE === 'kairo'
@@ -177,38 +182,41 @@ const lavalink = new LavalinkManager({
         onEmptyQueue: {
             destroyAfterMs: 0,
             autoPlayFunction: async (player, lastPlayedTrack) => {
-                const videoId = lastPlayedTrack?.info?.identifier;
-                if (!videoId || !lavalink.useable) return;
-
                 try {
-                    console.log(
-                        `[AUTOPLAY] Mencari rekomendasi YouTube untuk: ${lastPlayedTrack.info.title}`
-                    );
-
-                    const result = await player.search(
-                        `ytrec:${videoId}`,
-                        getRequester(lastPlayedTrack)
-                    );
-
-                    const candidates = result?.tracks || [];
-                    const next = candidates.find(track =>
-                        track?.info?.identifier &&
-                        track.info.identifier !== videoId
-                    );
-
-                    if (!next) {
-                        console.log('[AUTOPLAY] Tidak ada rekomendasi YouTube yang tersedia.');
+                    // Jangan mencari rekomendasi jika antrean sudah diisi.
+                    if (player.queue.tracks.length > 0) {
+                        console.log('[SMART RADIO] Antrean manual terdeteksi. Autoplay dilewati.');
                         return;
                     }
 
-                    rememberRequester(next, getRequester(lastPlayedTrack));
+                    const recommendation = await recommendNextTrack(
+                        player,
+                        lastPlayedTrack
+                    );
+
+                    if (!recommendation?.track) return;
+
+                    // Periksa kembali setelah pencarian selesai.
+                    // Pengguna mungkin sudah menambahkan lagu saat pencarian berlangsung.
+                    if (player.queue.tracks.length > 0) {
+                        console.log('[SMART RADIO] Antrean berubah saat pencarian. Rekomendasi dibatalkan.');
+                        return;
+                    }
+
+                    const next = recommendation.track;
+
+                    rememberRequester(
+                        next,
+                        getRequester(lastPlayedTrack)
+                    );
+
                     player.queue.add(next);
 
                     console.log(
-                        `[AUTOPLAY] Rekomendasi: ${next.info?.title || 'Unknown'}`
+                        `[SMART RADIO QUEUED] ${next.info?.title || 'Unknown'} | Score: ${recommendation.score}`
                     );
                 } catch (error) {
-                    console.error('[AUTOPLAY YOUTUBE]', error);
+                    console.error('[SMART RADIO AUTOPLAY]', error);
                 }
             }
         }
@@ -848,6 +856,10 @@ async function openQueueDashboard(interaction, player) {
 
 const commands = [
     new SlashCommandBuilder()
+        .setName('help')
+        .setDescription('Kenalan dengan fitur dan perintah ZOMA APP'),
+
+    new SlashCommandBuilder()
         .setName('ping')
         .setDescription('Cek status ZOMA APP'),
     new SlashCommandBuilder()
@@ -919,6 +931,9 @@ lavalink.nodeManager.on('error', (node, error) => {
 
 lavalink.on('trackStart', async (player, track) => {
     const requester = getRequester(track);
+
+    await recordTrackStart(player.guildId, track);
+
     console.log(`[TRACK START] ${track?.info?.title || 'Unknown'} | Guild: ${player.guildId}`);
     await sendNotice(player.guildId, trackEmbed(track, requester));
 });
@@ -1030,6 +1045,69 @@ client.on('interactionCreate', async interaction => {
         const command = interaction.commandName;
         const guildId = interaction.guildId;
 
+        if (command === 'help') {
+            const helpEmbed = new EmbedBuilder()
+                .setColor(0x2B2D31)
+                .setAuthor({
+                    name: 'ZOMA APP 🎩',
+                    iconURL: client.user.displayAvatarURL()
+                })
+                .setTitle('𓆩 HE!P — ZOMA APP 𓆪')
+                .setDescription(
+                    'Hey! Bingung mau mulai dari mana? Santai, ZOMA siap nemenin musik kamu. 🎶\\n' +
+                    'Pilih lagu, atur antrean, atau biarkan Smart Radio mencari teman untuk lagu berikutnya.'
+                )
+                .addFields(
+                    {
+                        name: '🎵 Putar Musik',
+                        value:
+                            '`/play` — Putar lagu dari judul atau link YouTube.\\n' +
+                            '`/search` — Cari lagu dan pilih dari 5 hasil yang tersedia.',
+                        inline: false
+                    },
+                    {
+                        name: '🎛️ Kontrol Musik',
+                        value:
+                            '`/pause` — Istirahatkan musik sebentar.\\n' +
+                            '`/resume` — Lanjutkan lagu.\\n' +
+                            '`/skip` — Lewati lagu sekarang.\\n' +
+                            '`/stop` — Hentikan musik dan kosongkan antrean.\\n' +
+                            '`/leave` — Minta ZOMA keluar dari voice channel.',
+                        inline: false
+                    },
+                    {
+                        name: '📜 Antrean & Playlist',
+                        value:
+                            '`/queue` — Buka dashboard antrean, atur lagu, shuffle, loop, dan playlist pribadi.\\n' +
+                            '💾 Gunakan tombol **Save Playlist** pada pesan lagu untuk menyimpan lagu favorit.',
+                        inline: false
+                    },
+                    {
+                        name: '🔊 Pengaturan',
+                        value:
+                            '`/volume` — Atur volume musik dari 1–100%.\\n' +
+                            '`/loop` — Pilih pengulangan Off, Track, atau Queue.',
+                        inline: false
+                    },
+                    {
+                        name: '📻 Smart Radio',
+                        value:
+                            'Kalau antrean kosong, ZOMA bisa mencarikan lagu berikutnya. Rekomendasi mempertimbangkan bahasa, genre, suasana lagu, dan riwayat pemutaran supaya musik tidak terasa itu-itu saja.',
+                        inline: false
+                    },
+                    {
+                        name: '🏓 Lainnya',
+                        value: '`/ping` — Cek apakah ZOMA sedang aktif.',
+                        inline: false
+                    }
+                )
+                .setFooter({ text: 'Made to keep the music going. 🎩' })
+                .setTimestamp();
+
+            await interaction.reply({ embeds: [helpEmbed] });
+            return;
+        }
+
         if (command === 'ping') {
             await interaction.reply({
                 content: `🏓 Pong! ZOMA APP aktif. Latency: ${client.ws.ping}ms`,
@@ -1048,7 +1126,12 @@ client.on('interactionCreate', async interaction => {
                 return;
             }
 
-            const result = await player.search(query, interaction.user);
+            const isYoutubeUrl = /^https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be|music\.youtube\.com)\//i.test(query.trim());
+            const searchQuery = isYoutubeUrl ? query.trim() : query;
+
+            console.log(`[PLAY] ${isYoutubeUrl ? 'YouTube URL' : 'Search'}: ${searchQuery}`);
+
+            const result = await player.search(searchQuery, interaction.user);
             const tracks = result?.tracks || [];
 
             if (!tracks.length) {
@@ -1097,34 +1180,42 @@ client.on('interactionCreate', async interaction => {
             if (!await checkVoice(interaction, player)) return;
         }
 
-        if (command === 'pause') {
-            await player.pause();
-            await interaction.reply('⏸️ Musik dijeda.');
-        } else if (command === 'resume') {
-            await player.resume();
-            await interaction.reply('▶️ Musik dilanjutkan.');
-        } else if (command === 'skip') {
-            await player.skip();
-            await interaction.reply('⏭️ Lagu dilewati.');
-        } else if (command === 'stop') {
-            await player.stopPlaying(true, false);
-            await player.setRepeatMode('off');
-            await interaction.reply('⏹️ Musik dihentikan dan antrean dikosongkan.');
-        } else if (command === 'queue') {
+        if (command === 'queue') {
             await openQueueDashboard(interaction, player);
-        } else if (command === 'volume') {
-            const volume = interaction.options.getInteger('angka', true);
-            await player.setVolume(volume);
-            await interaction.reply(`🔊 Volume diatur ke **${volume}%**.`);
-        } else if (command === 'loop') {
-            const mode = interaction.options.getString('mode', true);
-            await player.setRepeatMode(mode);
-            await interaction.reply(`🔁 Mode loop: **${mode}**.`);
-        } else if (command === 'leave') {
-            await player.stopPlaying(true, false);
-            await player.setRepeatMode('off');
-            await player.destroy('Perintah leave');
-            await interaction.reply('👋 ZOMA APP keluar dari voice channel.');
+        } else if (['pause', 'resume', 'skip', 'stop', 'volume', 'loop', 'leave'].includes(command)) {
+            await interaction.deferReply();
+
+            let response;
+
+            if (command === 'pause') {
+                await player.pause();
+                response = '⏸️ Musik dijeda.';
+            } else if (command === 'resume') {
+                await player.resume();
+                response = '▶️ Musik dilanjutkan.';
+            } else if (command === 'skip') {
+                await player.skip();
+                response = '⏭️ Lagu dilewati.';
+            } else if (command === 'stop') {
+                await player.stopPlaying(true, false);
+                await player.setRepeatMode('off');
+                response = '⏹️ Musik dihentikan dan antrean dikosongkan.';
+            } else if (command === 'volume') {
+                const volume = interaction.options.getInteger('angka', true);
+                await player.setVolume(volume);
+                response = `🔊 Volume diatur ke **${volume}%**.`;
+            } else if (command === 'loop') {
+                const mode = interaction.options.getString('mode', true);
+                await player.setRepeatMode(mode);
+                response = `🔁 Mode loop: **${mode}**.`;
+            } else if (command === 'leave') {
+                await player.stopPlaying(true, false);
+                await player.setRepeatMode('off');
+                await player.destroy('Perintah leave');
+                response = '👋 ZOMA APP keluar dari voice channel.';
+            }
+
+            await interaction.editReply(response);
         }
     } catch (error) {
         console.error('[INTERACTION ERROR]', error);
