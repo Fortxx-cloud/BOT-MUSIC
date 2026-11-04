@@ -601,7 +601,11 @@ client.once('clientReady', async () => {
 
     const rest = new REST({ version: '10' }).setToken(TOKEN);
     const registered = await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-    console.log('Slash commands terdaftar:', registered.map(c => c.name).join(', '));
+    console.log('Slash commands terkirim:', registered.map(c => c.name).join(', '));
+
+    const verified = await rest.get(Routes.applicationCommands(client.user.id));
+    console.log('Slash commands tersimpan di Discord:', verified.length);
+    console.log('Daftar command Discord:', verified.map(c => '/' + c.name).join(', '));
 });
 
 lavalink.nodeManager.on('connect', node => {
