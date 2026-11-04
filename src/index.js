@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { readFile, writeFile } from 'node:fs/promises';
 
 import {
     ActionRowBuilder,
@@ -7,6 +8,9 @@ import {
     ButtonStyle,
     Client,
     EmbedBuilder,
+    ModalBuilder,
+    TextInputBuilder,
+    TextInputStyle,
     GatewayIntentBits,
     REST,
     Routes,
@@ -57,6 +61,67 @@ const client = new Client({
 const requesterByTrack = new Map();
 const noticeChannels = new Map();
 const dashboardCollectors = new Map();
+const pendingPlaylistTracks = new Map();
+const PLAYLIST_FILE = new URL('../playlists.json', import.meta.url);
+let playlistWriteQueue = Promise.resolve();
+
+async function readPlaylists() {
+    try {
+        const data = JSON.parse(await readFile(PLAYLIST_FILE, 'utf8'));
+        return data && typeof data === 'object' && !Array.isArray(data) ? data : {};
+    } catch (error) {
+        if (error.code === 'ENOENT') return {};
+        throw error;
+    }
+}
+
+function updatePlaylists(mutator) {
+    const operation = playlistWriteQueue.then(async () => {
+        const playlists = await readPlaylists();
+        const result = await mutator(playlists);
+        await writeFile(PLAYLIST_FILE, JSON.stringify(playlists, null, 2));
+        return result;
+    });
+    playlistWriteQueue = operation.catch(() => {});
+    return operation;
+}
+
+async function savePlaylistTrack(userId, playlistName, track) {
+    const name = playlistName.trim();
+    if (!name || !track?.encoded || !track?.info) {
+        throw new Error('Data playlist atau track tidak valid.');
+    }
+
+    return updatePlaylists(playlists => {
+        playlists[userId] ||= {};
+        playlists[userId][name] ||= [];
+        playlists[userId][name].push({
+            encoded: track.encoded,
+            info: track.info,
+            pluginInfo: track.pluginInfo || {},
+            savedAt: new Date().toISOString()
+        });
+        return playlists[userId][name].length;
+    });
+}
+
+async function deletePlaylist(userId, playlistName) {
+    return updatePlaylists(playlists => {
+        if (!playlists[userId]?.[playlistName]) return false;
+        delete playlists[userId][playlistName];
+        if (!Object.keys(playlists[userId]).length) delete playlists[userId];
+        return true;
+    });
+}
+
+async function deletePlaylistTrack(userId, playlistName, index) {
+    return updatePlaylists(playlists => {
+        const tracks = playlists[userId]?.[playlistName];
+        if (!Array.isArray(tracks) || !Number.isInteger(index) || index < 0 || index >= tracks.length) return false;
+        tracks.splice(index, 1);
+        return true;
+    });
+}
 
 const EQ_15_BAND = [
     { band: 0, gain: 0.02 },
@@ -311,7 +376,8 @@ function playerButtons() {
         new ButtonBuilder().setCustomId('zoma:pause').setLabel('Pause').setEmoji('⏸️').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('zoma:resume').setLabel('Resume').setEmoji('▶️').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId('zoma:skip').setLabel('Skip').setEmoji('⏭️').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('zoma:stop').setLabel('Stop').setEmoji('⏹️').setStyle(ButtonStyle.Danger)
+        new ButtonBuilder().setCustomId('zoma:stop').setLabel('Stop').setEmoji('⏹️').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('zoma:save_playlist').setLabel('Simpan Playlist').setEmoji('💾').setStyle(ButtonStyle.Secondary)
     );
 }
 
@@ -377,13 +443,15 @@ async function showSearchSelection(interaction, player, tracks, query) {
     });
 }
 
+
 function queueEmbed(player, page = 0) {
-    const tracks = player.queue.tracks || [];
+    const tracks = player?.queue?.tracks || [];
     const totalPages = Math.max(1, Math.ceil(tracks.length / QUEUE_PAGE_SIZE));
     const safePage = Math.min(Math.max(page, 0), totalPages - 1);
     const start = safePage * QUEUE_PAGE_SIZE;
     const pageTracks = tracks.slice(start, start + QUEUE_PAGE_SIZE);
-    const current = player.queue.current;
+    const current = player?.queue?.current;
+
     const totalDuration = tracks.reduce((sum, track) => {
         const duration = track.info?.duration;
         return sum + (Number.isFinite(duration) ? duration : 0);
@@ -396,7 +464,7 @@ function queueEmbed(player, page = 0) {
 
     description += `**Antrean:** ${tracks.length} lagu\n`;
     description += `**Total durasi antrean:** ${formatDuration(totalDuration)}\n`;
-    description += `**Loop:** ${player.repeatMode || 'off'}\n\n`;
+    description += `**Loop:** ${player?.repeatMode || 'off'}\n\n`;
 
     if (pageTracks.length) {
         description += pageTracks.map((track, index) => {
@@ -411,6 +479,7 @@ function queueEmbed(player, page = 0) {
     embed.setDescription(description);
     if (current?.info?.artworkUrl) embed.setThumbnail(current.info.artworkUrl);
     embed.setFooter({ text: `${BRAND} • Halaman ${safePage + 1}/${totalPages}` });
+
     return { embed, page: safePage, totalPages, pageTracks, start };
 }
 
@@ -427,6 +496,7 @@ function queueComponents(player, page, clearing = false) {
                 description: `Posisi antrean ${data.start + index + 1}`.slice(0, 100),
                 value: String(data.start + index)
             })));
+
         rows.push(new ActionRowBuilder().addComponents(select));
     }
 
@@ -441,24 +511,113 @@ function queueComponents(player, page, clearing = false) {
             new ButtonBuilder().setCustomId('zoma_q_clear_yes').setLabel('Ya, hapus antrean').setStyle(ButtonStyle.Danger),
             new ButtonBuilder().setCustomId('zoma_q_clear_no').setLabel('Batal').setStyle(ButtonStyle.Secondary)
         ));
-    } else {
+    } else if (player) {
         rows.push(new ActionRowBuilder().addComponents(
             new ButtonBuilder().setCustomId('zoma_q_shuffle').setLabel('Shuffle').setStyle(ButtonStyle.Primary),
             new ButtonBuilder().setCustomId('zoma_q_loop').setLabel('Loop').setStyle(ButtonStyle.Secondary),
             new ButtonBuilder().setCustomId('zoma_q_clear').setLabel('Clear Queue').setStyle(ButtonStyle.Danger)
         ));
+
         rows.push(new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId('zoma:pause').setLabel('Pause').setStyle(ButtonStyle.Secondary),
-            new ButtonBuilder().setCustomId('zoma:resume').setLabel('Resume').setStyle(ButtonStyle.Success),
-            new ButtonBuilder().setCustomId('zoma:skip').setLabel('Skip').setStyle(ButtonStyle.Primary)
+            new ButtonBuilder().setCustomId('zoma_q_pause').setLabel('Pause').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('zoma_q_resume').setLabel('Resume').setStyle(ButtonStyle.Success),
+            new ButtonBuilder().setCustomId('zoma_q_skip').setLabel('Skip').setStyle(ButtonStyle.Primary)
         ));
     }
+
+    rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('zoma_pl_open').setLabel('Playlist Saya').setEmoji('💾').setStyle(ButtonStyle.Success)
+    ));
 
     return rows;
 }
 
+async function playlistDashboard(userId, selectedName = null, selectedIndex = null) {
+    const playlists = await readPlaylists();
+    const ownPlaylists = playlists[userId] || {};
+    const names = Object.keys(ownPlaylists);
+    const embed = makeEmbed('💾 PLAYLIST SAYA');
+
+    if (!names.length) {
+        embed.setDescription('Kamu belum memiliki playlist.\nGunakan tombol **Simpan Playlist** pada pesan lagu untuk menyimpan lagu pertama.');
+        return {
+            embed,
+            components: [
+                new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('zoma_pl_back').setLabel('Kembali ke Queue').setStyle(ButtonStyle.Secondary)
+                )
+            ]
+        };
+    }
+
+    const visibleNames = names.slice(0, 25);
+    const rows = [];
+
+    rows.push(new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+            .setCustomId('zoma_pl_select')
+            .setPlaceholder('Pilih playlist milikmu')
+            .addOptions(visibleNames.map(name => ({
+                label: name.slice(0, 100),
+                description: `${ownPlaylists[name].length} lagu`.slice(0, 100),
+                value: name
+            })))
+    ));
+
+    if (selectedName && Array.isArray(ownPlaylists[selectedName])) {
+        const tracks = ownPlaylists[selectedName];
+        const safeIndex = Number.isInteger(selectedIndex) && selectedIndex >= 0 && selectedIndex < tracks.length
+            ? selectedIndex : null;
+
+        embed.setDescription(
+            `**Playlist:** ${selectedName}\n` +
+            `**Jumlah lagu:** ${tracks.length}\n\n` +
+            (tracks.length
+                ? tracks.slice(0, 10).map((track, index) =>
+                    `**${index + 1}. ${track.info?.title || 'Unknown'}**\n${track.info?.author || 'Unknown'}`
+                ).join('\n\n')
+                : 'Playlist ini kosong.')
+        );
+
+        if (tracks.length) {
+            rows.push(new ActionRowBuilder().addComponents(
+                new StringSelectMenuBuilder()
+                    .setCustomId('zoma_pl_track')
+                    .setPlaceholder('Pilih lagu untuk dihapus')
+                    .addOptions(tracks.slice(0, 25).map((track, index) => ({
+                        label: String(track.info?.title || `Track ${index + 1}`).slice(0, 100),
+                        description: `Lagu nomor ${index + 1}`.slice(0, 100),
+                        value: String(index),
+                        default: index === safeIndex
+                    })))
+            ));
+        }
+
+        rows.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('zoma_pl_play').setLabel('Putar Playlist').setEmoji('▶️').setStyle(ButtonStyle.Success).setDisabled(!tracks.length),
+            new ButtonBuilder().setCustomId('zoma_pl_remove').setLabel('Hapus Lagu').setEmoji('🗑️').setStyle(ButtonStyle.Danger).setDisabled(safeIndex === null),
+            new ButtonBuilder().setCustomId('zoma_pl_delete').setLabel('Hapus Playlist').setStyle(ButtonStyle.Danger)
+        ));
+    } else {
+        embed.setDescription(
+            `Kamu memiliki **${names.length} playlist**.\nPilih playlist dari menu di atas untuk melihat lagu-lagunya.` +
+            (names.length > 25 ? '\n\nHanya 25 playlist pertama yang ditampilkan.' : '')
+        );
+    }
+
+    rows.push(new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('zoma_pl_back').setLabel('Kembali ke Queue').setStyle(ButtonStyle.Secondary)
+    ));
+
+    return { embed, components: rows };
+}
+
 async function openQueueDashboard(interaction, player) {
     let page = 0;
+    let selectedPlaylist = null;
+    let selectedTrack = null;
+    let showingPlaylists = false;
+
     const first = queueEmbed(player, page);
     await interaction.reply({
         embeds: [first.embed],
@@ -466,35 +625,160 @@ async function openQueueDashboard(interaction, player) {
     });
 
     const message = await interaction.fetchReply();
-    const collector = message.createMessageComponentCollector({ time: 300_000 });
+    const collector = message.createMessageComponentCollector({ time: 900_000 });
     dashboardCollectors.set(message.id, collector);
 
     collector.on('collect', async component => {
         if (component.user.id !== interaction.user.id) {
-            await component.reply({ content: 'Dashboard ini hanya bisa digunakan oleh yang membukanya.', ephemeral: true });
-            return;
-        }
-
-        const currentPlayer = getPlayer(interaction.guildId);
-        if (!currentPlayer) {
-            await component.update({ embeds: [makeEmbed('❌ PLAYER TIDAK ADA')], components: [] });
-            collector.stop();
-            return;
-        }
-
-        if (getMemberVoiceChannel(component) !== currentPlayer.voiceChannelId) {
-            await component.reply({ content: 'Lu harus berada di voice channel yang sama dengan bot.', ephemeral: true });
+            await component.reply({
+                content: 'Dashboard ini hanya bisa digunakan oleh yang membukanya.',
+                ephemeral: true
+            });
             return;
         }
 
         try {
             const id = component.customId;
 
+            if (id === 'zoma_pl_open') {
+                showingPlaylists = true;
+                selectedPlaylist = null;
+                selectedTrack = null;
+                const view = await playlistDashboard(component.user.id);
+                await component.update({ embeds: [view.embed], components: view.components });
+                return;
+            }
+
+            if (id === 'zoma_pl_select') {
+                showingPlaylists = true;
+                selectedPlaylist = component.values[0];
+                selectedTrack = null;
+                const view = await playlistDashboard(component.user.id, selectedPlaylist);
+                await component.update({ embeds: [view.embed], components: view.components });
+                return;
+            }
+
+            if (id === 'zoma_pl_track') {
+                selectedTrack = Number(component.values[0]);
+                const view = await playlistDashboard(component.user.id, selectedPlaylist, selectedTrack);
+                await component.update({ embeds: [view.embed], components: view.components });
+                return;
+            }
+
+            if (id === 'zoma_pl_remove') {
+                if (!selectedPlaylist || !Number.isInteger(selectedTrack)) {
+                    await component.reply({ content: 'Pilih lagu yang ingin dihapus terlebih dahulu.', ephemeral: true });
+                    return;
+                }
+
+                const removed = await deletePlaylistTrack(component.user.id, selectedPlaylist, selectedTrack);
+                selectedTrack = null;
+                const playlists = await readPlaylists();
+
+                if (!playlists[component.user.id]?.[selectedPlaylist]) selectedPlaylist = null;
+
+                const view = await playlistDashboard(component.user.id, selectedPlaylist);
+                await component.update({ embeds: [view.embed], components: view.components });
+                return;
+            }
+
+            if (id === 'zoma_pl_delete') {
+                if (!selectedPlaylist) {
+                    await component.reply({ content: 'Pilih playlist terlebih dahulu.', ephemeral: true });
+                    return;
+                }
+
+                await deletePlaylist(component.user.id, selectedPlaylist);
+                selectedPlaylist = null;
+                selectedTrack = null;
+                const view = await playlistDashboard(component.user.id);
+                await component.update({ embeds: [makeEmbed('🗑️ PLAYLIST DIHAPUS', 'Playlist berhasil dihapus.'), view.embed], components: view.components });
+                return;
+            }
+
+            if (id === 'zoma_pl_play') {
+                if (!selectedPlaylist) {
+                    await component.reply({ content: 'Pilih playlist terlebih dahulu.', ephemeral: true });
+                    return;
+                }
+
+                const voiceChannel = getMemberVoiceChannel(component);
+                if (!voiceChannel) {
+                    await component.reply({ content: 'Masuk voice channel terlebih dahulu untuk memutar playlist.', ephemeral: true });
+                    return;
+                }
+
+                await connectPlayer(component);
+                const playbackPlayer = getPlayer(component.guildId);
+
+                if (!playbackPlayer || !lavalink.useable) {
+                    await component.reply({ content: '❌ Audio node belum siap.', ephemeral: true });
+                    return;
+                }
+
+                const playlists = await readPlaylists();
+                const savedTracks = playlists[component.user.id]?.[selectedPlaylist] || [];
+
+                if (!savedTracks.length) {
+                    await component.reply({ content: 'Playlist ini kosong.', ephemeral: true });
+                    return;
+                }
+
+                const restoredTracks = savedTracks.map(saved => lavalink.utils.buildTrack({
+                    encoded: saved.encoded,
+                    info: saved.info,
+                    pluginInfo: saved.pluginInfo || {}
+                }, component.user));
+
+                await addTracks(playbackPlayer, restoredTracks, component.user);
+
+                showingPlaylists = false;
+                const refreshed = queueEmbed(playbackPlayer, 0);
+                page = 0;
+                await component.update({
+                    embeds: [makeEmbed('▶️ PLAYLIST DIMASUKKAN', `**${selectedPlaylist}** • ${restoredTracks.length} lagu`), refreshed.embed],
+                    components: queueComponents(playbackPlayer, page)
+                });
+                return;
+            }
+
+            if (id === 'zoma_pl_back') {
+                showingPlaylists = false;
+                const currentPlayer = getPlayer(interaction.guildId);
+                const refreshed = queueEmbed(currentPlayer, page);
+                page = refreshed.page;
+                await component.update({
+                    embeds: [refreshed.embed],
+                    components: queueComponents(currentPlayer, page)
+                });
+                return;
+            }
+
+            const currentPlayer = getPlayer(interaction.guildId);
+
+            if (!currentPlayer) {
+                await component.reply({
+                    content: 'Belum ada player aktif. Gunakan Playlist Saya untuk melihat koleksi lagumu.',
+                    ephemeral: true
+                });
+                return;
+            }
+
+            if (getMemberVoiceChannel(component) !== currentPlayer.voiceChannelId) {
+                await component.reply({
+                    content: 'Lu harus berada di voice channel yang sama dengan bot.',
+                    ephemeral: true
+                });
+                return;
+            }
+
             if (id === 'zoma_queue_remove') {
                 const index = Number(component.values[0]);
                 const removed = currentPlayer.queue.tracks[index];
                 if (removed) await currentPlayer.queue.splice(index, 1);
+
                 const refreshed = queueEmbed(currentPlayer, page);
+                page = refreshed.page;
                 await component.update({
                     embeds: [makeEmbed('🗑️ LAGU DIHAPUS', `${removed?.info?.title || 'Lagu'} dihapus dari antrean.`), refreshed.embed],
                     components: queueComponents(currentPlayer, page)
@@ -517,12 +801,15 @@ async function openQueueDashboard(interaction, player) {
                 return;
             } else if (id === 'zoma_q_clear_yes') {
                 await currentPlayer.queue.splice(0, currentPlayer.queue.tracks.length);
-                const refreshed = queueEmbed(currentPlayer, 0);
                 page = 0;
-                await component.update({ embeds: [refreshed.embed], components: queueComponents(currentPlayer, page) });
-                return;
             } else if (id === 'zoma_q_clear_no') {
                 // Kembali ke dashboard normal.
+            } else if (id === 'zoma_q_pause') {
+                await currentPlayer.pause();
+            } else if (id === 'zoma_q_resume') {
+                await currentPlayer.resume();
+            } else if (id === 'zoma_q_skip') {
+                await currentPlayer.skip();
             }
 
             const refreshed = queueEmbed(currentPlayer, page);
@@ -534,7 +821,10 @@ async function openQueueDashboard(interaction, player) {
         } catch (error) {
             console.error('[QUEUE DASHBOARD]', error);
             if (!component.replied && !component.deferred) {
-                await component.reply({ content: '❌ Gagal memproses dashboard.', ephemeral: true }).catch(() => {});
+                await component.reply({
+                    content: `❌ Gagal memproses dashboard: ${error.message}`,
+                    ephemeral: true
+                }).catch(() => {});
             }
         }
     });
@@ -650,6 +940,59 @@ lavalink.on('queueEnd', async player => {
 
 client.on('interactionCreate', async interaction => {
     try {
+        if (interaction.isButton() && interaction.customId === 'zoma:save_playlist') {
+            const saved = pendingPlaylistTracks.get(interaction.message.id);
+
+            if (!saved) {
+                await interaction.reply({ content: '❌ Data lagu sudah kedaluwarsa.', ephemeral: true });
+                return;
+            }
+
+            const modal = new ModalBuilder()
+                .setCustomId(`zoma_save_playlist:${interaction.message.id}`)
+                .setTitle('Simpan Lagu ke Playlist');
+
+            const input = new TextInputBuilder()
+                .setCustomId('playlist_name')
+                .setLabel('Nama playlist')
+                .setPlaceholder('Contoh: Lagu Favorit')
+                .setStyle(TextInputStyle.Short)
+                .setRequired(true)
+                .setMaxLength(50);
+
+            modal.addComponents(new ActionRowBuilder().addComponents(input));
+            await interaction.showModal(modal);
+            return;
+        }
+
+        if (interaction.isModalSubmit() && interaction.customId.startsWith('zoma_save_playlist:')) {
+            const messageId = interaction.customId.split(':')[1];
+            const saved = pendingPlaylistTracks.get(messageId);
+
+            if (!saved) {
+                await interaction.reply({ content: '❌ Data lagu sudah kedaluwarsa.', ephemeral: true });
+                return;
+            }
+
+            const name = interaction.fields.getTextInputValue('playlist_name').trim();
+            if (!name) {
+                await interaction.reply({ content: '❌ Nama playlist tidak boleh kosong.', ephemeral: true });
+                return;
+            }
+
+            try {
+                const count = await savePlaylistTrack(interaction.user.id, name, saved);
+                await interaction.reply({
+                    content: `💾 **${saved.info?.title || 'Lagu'}** disimpan ke playlist **${name}**. Total lagu: **${count}**.`,
+                    ephemeral: true
+                });
+            } catch (error) {
+                console.error('[PLAYLIST SAVE]', error);
+                await interaction.reply({ content: '❌ Gagal menyimpan playlist.', ephemeral: true });
+            }
+            return;
+        }
+
         if (interaction.isButton() && interaction.customId.startsWith('zoma:')) {
             const player = getPlayer(interaction.guildId);
             if (!await checkVoice(interaction, player)) return;
@@ -723,13 +1066,22 @@ client.on('interactionCreate', async interaction => {
                 embeds: [trackEmbed(selected, interaction.user)],
                 components: [playerButtons()]
             });
+
+            const playMessage = await interaction.fetchReply();
+            pendingPlaylistTracks.set(playMessage.id, selected);
+
+            const cleanup = setTimeout(() => {
+                pendingPlaylistTracks.delete(playMessage.id);
+            }, 30 * 60 * 1000);
+            cleanup.unref?.();
+
             return;
         }
 
         const player = getPlayer(guildId);
 
         if (command === 'pause' || command === 'resume' || command === 'skip' ||
-            command === 'stop' || command === 'queue' || command === 'volume' ||
+            command === 'stop' || command === 'volume' ||
             command === 'loop' || command === 'leave') {
             if (!await checkVoice(interaction, player)) return;
         }

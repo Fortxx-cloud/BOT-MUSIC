@@ -1,3 +1,15 @@
 node_modules/
 .env
 npm-debug.log*
+
+# NodeLink runtime
+nodes/nodelink/app/node_modules/
+nodes/nodelink/app/logs/
+
+# NodeLink private configuration
+nodes/nodelink/config.ts
+nodes/nodelink/app/config.ts
+nodes/nodelink/app/.env
+
+# Private user playlist data
+playlists.json
