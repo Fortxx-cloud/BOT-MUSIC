@@ -1191,8 +1191,12 @@ client.on('interactionCreate', async interaction => {
                 await player.pause();
                 response = '⏸️ Musik dijeda.';
             } else if (command === 'resume') {
-                await player.resume();
-                response = '▶️ Musik dilanjutkan.';
+                if (!player.paused) {
+                    response = '🤣 Lah, musiknya kan belum dijeda, SUKIII! Santai dulu wkwkwk.';
+                } else {
+                    await player.resume();
+                    response = '▶️ Musik dilanjutkan. Selamat mendengarkan lagi! 🎶';
+                }
             } else if (command === 'skip') {
                 await player.skip();
                 response = '⏭️ Lagu dilewati.';
@@ -1220,7 +1224,10 @@ client.on('interactionCreate', async interaction => {
     } catch (error) {
         console.error('[INTERACTION ERROR]', error);
 
-        const message = '❌ Terjadi kesalahan saat menjalankan perintah.';
+        const message =
+            '😭 **SABAR SUKIII !!!**\\n' +
+            'Waduh, ZOMA lagi ngambek bentar nih wkwkwk.\\n' +
+            'Coba lagi ya, jangan panik dulu! 🎩';
         if (interaction.isRepliable()) {
             if (interaction.deferred || interaction.replied) {
                 await interaction.editReply(message).catch(() => {});
