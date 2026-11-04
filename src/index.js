@@ -177,27 +177,38 @@ const lavalink = new LavalinkManager({
         onEmptyQueue: {
             destroyAfterMs: 0,
             autoPlayFunction: async (player, lastPlayedTrack) => {
-                // Autoplay parsial: coba cari lagu lain dari artis yang sama.
-                const author = lastPlayedTrack?.info?.author;
-                if (!author || !lavalink.useable) return;
+                const videoId = lastPlayedTrack?.info?.identifier;
+                if (!videoId || !lavalink.useable) return;
 
                 try {
+                    console.log(
+                        `[AUTOPLAY] Mencari rekomendasi YouTube untuk: ${lastPlayedTrack.info.title}`
+                    );
+
                     const result = await player.search(
-                        `ytmsearch:${author}`,
+                        `ytrec:${videoId}`,
                         getRequester(lastPlayedTrack)
                     );
 
                     const candidates = result?.tracks || [];
                     const next = candidates.find(track =>
-                        track?.info?.identifier !== lastPlayedTrack?.info?.identifier
+                        track?.info?.identifier &&
+                        track.info.identifier !== videoId
                     );
 
-                    if (next) {
-                        rememberRequester(next, getRequester(lastPlayedTrack));
-                        player.queue.add(next);
+                    if (!next) {
+                        console.log('[AUTOPLAY] Tidak ada rekomendasi YouTube yang tersedia.');
+                        return;
                     }
+
+                    rememberRequester(next, getRequester(lastPlayedTrack));
+                    player.queue.add(next);
+
+                    console.log(
+                        `[AUTOPLAY] Rekomendasi: ${next.info?.title || 'Unknown'}`
+                    );
                 } catch (error) {
-                    console.error('[AUTOPLAY]', error);
+                    console.error('[AUTOPLAY YOUTUBE]', error);
                 }
             }
         }
@@ -619,12 +630,12 @@ async function openQueueDashboard(interaction, player) {
     let showingPlaylists = false;
 
     const first = queueEmbed(player, page);
-    await interaction.reply({
+    await interaction.deferReply();
+
+    const message = await interaction.editReply({
         embeds: [first.embed],
         components: queueComponents(player, page)
     });
-
-    const message = await interaction.fetchReply();
     const collector = message.createMessageComponentCollector({ time: 900_000 });
     dashboardCollectors.set(message.id, collector);
 
