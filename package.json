@@ -1,0 +1,15 @@
+{
+  "name": "zoma-app",
+  "version": "1.0.0",
+  "description": "ZOMA APP Discord Music Bot",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.22.1",
+    "dotenv": "^16.4.7",
+    "lavalink-client": "2.11.0"
+  }
+}
