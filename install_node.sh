@@ -53,7 +53,13 @@ urllib.request.urlretrieve(url, destination + "/" + filename)
 PY
 
 echo "Memasang Node.js..."
-tar -xJf "$TMP_DIR/$FILE" -C "$TMP_DIR"
+python - "$TMP_DIR/$FILE" "$TMP_DIR" <<'EXTRACT'
+import sys, tarfile
+
+archive, destination = sys.argv[1:]
+with tarfile.open(archive, "r:xz") as tar:
+    tar.extractall(destination, filter="data")
+EXTRACT
 
 mkdir -p "$HOME/.local"
 mv "$TMP_DIR/${FILE%.tar.xz}" "$NODE_DIR"
