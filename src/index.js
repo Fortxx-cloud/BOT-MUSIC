@@ -33,7 +33,7 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const AUDIO_NODE = (process.env.AUDIO_NODE || 'nodelink').toLowerCase();
 const NODE_URI = AUDIO_NODE === 'kairo'
     ? (process.env.KAIRO_URI || process.env.LAVALINK_URI)
-    : process.env.LAVALINK_URI;
+    : 'http://node18.botkeep.cloud:61256';
 const NODE_PASSWORD = AUDIO_NODE === 'kairo'
     ? (process.env.KAIRO_PASSWORD || process.env.LAVALINK_PASSWORD)
     : process.env.LAVALINK_PASSWORD;
