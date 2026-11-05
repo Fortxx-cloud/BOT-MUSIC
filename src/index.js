@@ -18,11 +18,8 @@ import {
     StringSelectMenuBuilder
 } from 'discord.js';
 
-import {
-    LavalinkManager,
-    NodeType,
-    NodeLinkDefaultSources
-} from 'lavalink-client';
+import { LavalinkManager } from 'lavalink-client';
+import { AUDIO_NODES, AUDIO_SOURCE_RECORD } from './config/audio-nodes.js';
 
 import {
     recordTrackStart,
@@ -30,13 +27,7 @@ import {
 } from './music/smart-radio.js';
 
 const TOKEN = process.env.DISCORD_TOKEN;
-const AUDIO_NODE = (process.env.AUDIO_NODE || 'nodelink').toLowerCase();
-const NODE_URI = AUDIO_NODE === 'kairo'
-    ? (process.env.KAIRO_URI || process.env.LAVALINK_URI)
-    : 'http://node18.botkeep.cloud:61256';
-const NODE_PASSWORD = AUDIO_NODE === 'kairo'
-    ? (process.env.KAIRO_PASSWORD || process.env.LAVALINK_PASSWORD)
-    : process.env.LAVALINK_PASSWORD;
+
 
 const BRAND = 'ZOMA APP 🎩';
 const COLOR = 0x8B0000;
@@ -126,16 +117,8 @@ async function testBossWorker() {
 // ===== END BOSS INTEGRATION =====
 
 
-if (!TOKEN || !NODE_URI || !NODE_PASSWORD) {
+if (!TOKEN || !AUDIO_NODES.length) {
     console.error('Environment Discord atau audio node belum lengkap.');
-    process.exit(1);
-}
-
-let nodeURL;
-try {
-    nodeURL = new URL(NODE_URI);
-} catch {
-    console.error('Format LAVALINK_URI/KAIRO_URI tidak valid.');
     process.exit(1);
 }
 
@@ -230,16 +213,7 @@ const EQ_15_BAND = [
 ];
 
 const lavalink = new LavalinkManager({
-    nodes: [{
-        id: AUDIO_NODE === 'kairo' ? 'ZOMA-KAIRO' : 'ZOMA-NODELINK',
-        host: nodeURL.hostname,
-        port: Number(nodeURL.port || (nodeURL.protocol === 'https:' ? 443 : 80)),
-        authorization: NODE_PASSWORD,
-        secure: nodeURL.protocol === 'https:',
-        nodeType: NodeType.NodeLink,
-        retryAmount: 10,
-        retryDelay: 5000
-    }],
+    nodes: AUDIO_NODES,
 
     sendToShard: (guildId, payload) => {
         const guild = client.guilds.cache.get(guildId);
@@ -253,6 +227,14 @@ const lavalink = new LavalinkManager({
 
     autoSkip: true,
     autoSkipOnResolveError: true,
+    autoMove: process.env.AUDIO_FAILOVER !== 'false',
+    advancedOptions: {
+        playerMigration: {
+            concurrency: 3,
+            perTargetConcurrency: 2,
+            backpressureDelayMs: 250
+        }
+    },
 
     playerOptions: {
         defaultSearchPlatform: 'ytmsearch',
@@ -310,7 +292,7 @@ const lavalink = new LavalinkManager({
     }
 });
 
-lavalink.utils.SourcesRecord = NodeLinkDefaultSources;
+lavalink.utils.SourcesRecord = AUDIO_SOURCE_RECORD;
 client.lavalink = lavalink;
 
 function makeEmbed(title, description = '', color = COLOR) {
