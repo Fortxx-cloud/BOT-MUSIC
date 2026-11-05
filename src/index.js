@@ -43,6 +43,89 @@ const COLOR = 0x8B0000;
 const QUEUE_PAGE_SIZE = 8;
 const SEARCH_RESULT_LIMIT = 5;
 
+// ===== ZOMA BOSS INTEGRATION =====
+const BOSS_URL = process.env.BOSS_URL?.replace(/\/+$/, '');
+const BOSS_SECRET = process.env.BOSS_SECRET;
+
+async function testBossWorker() {
+    if (!BOSS_URL || !BOSS_SECRET) {
+        console.warn('[BOSS] Integration disabled: BOSS_URL/BOSS_SECRET missing.');
+        return;
+    }
+
+    const headers = {
+        Authorization: `Bearer ${BOSS_SECRET}`,
+        'Content-Type': 'application/json'
+    };
+
+    try {
+        const healthResponse = await fetch(`${BOSS_URL}/health`, {
+            signal: AbortSignal.timeout(10000)
+        });
+
+        if (!healthResponse.ok) {
+            throw new Error(`BOSS health HTTP ${healthResponse.status}`);
+        }
+
+        const health = await healthResponse.json();
+        console.log(`[BOSS] CONNECTED | ${health.service} v${health.version}`);
+
+        const createResponse = await fetch(`${BOSS_URL}/api/tasks`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+                type: 'WORKER_PING',
+                payload: { source: 'ZOMA_APP' }
+            }),
+            signal: AbortSignal.timeout(10000)
+        });
+
+        const created = await createResponse.json();
+
+        if (!createResponse.ok || !created.task?.id) {
+            throw new Error(created.error || 'Failed to create WORKER_PING task');
+        }
+
+        const taskId = created.task.id;
+        console.log(`[BOSS] WORKER_PING SENT | ${taskId}`);
+
+        for (let attempt = 0; attempt < 15; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            const response = await fetch(
+                `${BOSS_URL}/api/tasks/${taskId}`,
+                { headers, signal: AbortSignal.timeout(10000) }
+            );
+
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || `Task status HTTP ${response.status}`);
+            }
+
+            const task = data.task;
+
+            if (task?.status === 'completed') {
+                console.log(
+                    `[BOSS] WORKER ACK | ${task.result?.workerName || 'unknown'} | ` +
+                    `workerId=${task.result?.workerId || 'unknown'}`
+                );
+                return;
+            }
+
+            if (task?.status === 'failed') {
+                throw new Error(task.error || 'Worker task failed');
+            }
+        }
+
+        console.warn(`[BOSS] WORKER_PING TIMEOUT | ${taskId}`);
+    } catch (error) {
+        console.error('[BOSS] INTEGRATION ERROR:', error.message);
+    }
+}
+// ===== END BOSS INTEGRATION =====
+
+
 if (!TOKEN || !NODE_URI || !NODE_PASSWORD) {
     console.error('Environment Discord atau audio node belum lengkap.');
     process.exit(1);
@@ -906,6 +989,8 @@ client.once('clientReady', async () => {
         id: client.user.id,
         username: client.user.username
     });
+
+    void testBossWorker();
 
     client.user.setPresence({
         activities: [{ name: 'ZOMA APP 🎩 | /search', type: ActivityType.Listening }],
